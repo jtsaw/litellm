@@ -1,11 +1,15 @@
 import os
 from typing import TYPE_CHECKING, Any, Optional, Union
 
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.trace import SpanKind
+
 from litellm._logging import verbose_logger
 from litellm.integrations.arize import _utils
 from litellm.integrations.arize._utils import ArizeOTELAttributes
-from litellm.types.integrations.arize_phoenix import ArizePhoenixConfig
 from litellm.integrations.opentelemetry import OpenTelemetry
+from litellm.integrations.opentelemetry_utils.base_otel_llm_obs_attributes import safe_set_attribute
+from litellm.types.integrations.arize_phoenix import ArizePhoenixConfig
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span as _Span
@@ -26,6 +30,52 @@ ARIZE_HOSTED_PHOENIX_ENDPOINT = "https://otlp.arize.com/v1/traces"
 
 
 class ArizePhoenixLogger(OpenTelemetry):
+    """
+    Arize Phoenix logger that sends traces to a Phoenix endpoint.
+
+    Creates its own dedicated TracerProvider so it can coexist with the
+    generic ``otel`` callback (or any other OTEL-based integration) without
+    fighting over the global ``opentelemetry.trace`` TracerProvider singleton.
+    """
+
+    def _init_tracing(self, tracer_provider):
+        """
+        Override to always create a *private* TracerProvider for Arize Phoenix.
+
+        The base ``OpenTelemetry._init_tracing`` falls back to the global
+        TracerProvider when one already exists.  That causes whichever
+        integration initialises second to silently reuse the first one's
+        exporter, so spans only reach one destination.
+
+        By creating our own provider we guarantee Arize Phoenix always gets
+        its own exporter pipeline, regardless of initialisation order.
+        """
+        if tracer_provider is not None:
+            # Explicitly supplied (e.g. in tests) — honour it.
+            self.tracer = tracer_provider.get_tracer("litellm")
+            self.span_kind = SpanKind
+            return
+
+        # Always create a dedicated provider — never touch the global one.
+        provider = TracerProvider(resource=self._get_litellm_resource(self.config))
+        provider.add_span_processor(self._get_span_processor())
+        self.tracer = provider.get_tracer("litellm")
+        self.span_kind = SpanKind
+        verbose_logger.debug(
+            "ArizePhoenixLogger: Created dedicated TracerProvider "
+            "(endpoint=%s, exporter=%s)",
+            self.config.endpoint,
+            self.config.exporter,
+        )
+
+    def _init_otel_logger_on_litellm_proxy(self):
+        """
+        Override: Arize Phoenix should NOT overwrite the proxy's
+        ``open_telemetry_logger``.  That attribute is reserved for the
+        primary ``otel`` callback which handles proxy-level parent spans.
+        """
+        pass
+
     def set_attributes(self, span: Span, kwargs, response_obj: Optional[Any]):
         ArizePhoenixLogger.set_arize_phoenix_attributes(span, kwargs, response_obj)
         return
@@ -33,14 +83,47 @@ class ArizePhoenixLogger(OpenTelemetry):
     @staticmethod
     def set_arize_phoenix_attributes(span: Span, kwargs, response_obj):
         _utils.set_attributes(span, kwargs, response_obj, ArizeOTELAttributes)
-        
-        # Set project name on the span for all traces to go to custom Phoenix projects
-        config = ArizePhoenixLogger.get_arize_phoenix_config()
-        if config.project_name:
-            from litellm.integrations.opentelemetry_utils.base_otel_llm_obs_attributes import safe_set_attribute
-            safe_set_attribute(span, "openinference.project.name", config.project_name)
-        
+
+        # Dynamic project name: check metadata first, then fall back to env var config
+        dynamic_project_name = ArizePhoenixLogger._get_dynamic_project_name(kwargs)
+        if dynamic_project_name:
+            safe_set_attribute(span, "openinference.project.name", dynamic_project_name)
+        else:
+            # Fall back to static config from env var
+            config = ArizePhoenixLogger.get_arize_phoenix_config()
+            if config.project_name:
+                safe_set_attribute(span, "openinference.project.name", config.project_name)
+
         return
+
+    @staticmethod
+    def _get_dynamic_project_name(kwargs) -> Optional[str]:
+        """
+        Retrieve dynamic Phoenix project name from request metadata.
+
+        Users can set `metadata.phoenix_project_name` in their request to route
+        traces to different Phoenix projects dynamically.
+        """
+        standard_logging_payload = kwargs.get("standard_logging_object")
+        if isinstance(standard_logging_payload, dict):
+            metadata = standard_logging_payload.get("metadata")
+            if isinstance(metadata, dict):
+                project_name = metadata.get("phoenix_project_name")
+                if project_name:
+                    return str(project_name)
+
+        # Also check litellm_params.metadata for SDK usage
+        litellm_params = kwargs.get("litellm_params")
+        if isinstance(litellm_params, dict):
+            metadata = litellm_params.get("metadata") or {}
+        else:
+            metadata = {}
+        if isinstance(metadata, dict):
+            project_name = metadata.get("phoenix_project_name")
+            if project_name:
+                return str(project_name)
+
+        return None
 
     @staticmethod
     def get_arize_phoenix_config() -> ArizePhoenixConfig:
