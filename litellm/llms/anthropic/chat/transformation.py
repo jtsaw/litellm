@@ -171,9 +171,22 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         return tool_call
 
     @staticmethod
-    def _is_claude_opus_4_6(model: str) -> bool:
-        """Check if the model is Claude Opus 4.5."""
-        return "opus-4-6" in model.lower() or "opus_4_6" in model.lower()
+    def _is_claude_4_6_model(model: str) -> bool:
+        """Check if the model is a Claude 4.6 model that uses adaptive thinking."""
+        model_lower = model.lower()
+        return any(
+            model_variant in model_lower
+            for model_variant in (
+                "opus-4-6",
+                "opus_4_6",
+                "opus-4.6",
+                "opus_4.6",
+                "sonnet-4-6",
+                "sonnet_4_6",
+                "sonnet-4.6",
+                "sonnet_4.6",
+            )
+        )
 
     def get_supported_openai_params(self, model: str):
         params = [
@@ -193,9 +206,13 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
             "speed",
         ]
 
-        if "claude-3-7-sonnet" in model or supports_reasoning(
-            model=model,
-            custom_llm_provider=self.custom_llm_provider,
+        if (
+            "claude-3-7-sonnet" in model
+            or AnthropicConfig._is_claude_4_6_model(model)
+            or supports_reasoning(
+                model=model,
+                custom_llm_provider=self.custom_llm_provider,
+            )
         ):
             params.append("thinking")
             params.append("reasoning_effort")
@@ -206,20 +223,20 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
     def filter_anthropic_output_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
         """
         Filter out unsupported fields from JSON schema for Anthropic's output_format API.
-        
+
         Anthropic's output_format doesn't support certain JSON schema properties:
         - maxItems: Not supported for array types
         - minItems: Not supported for array types
-        
+
         This function recursively removes these unsupported fields while preserving
         all other valid schema properties.
-        
+
         Args:
             schema: The JSON schema dictionary to filter
-            
+
         Returns:
             A new dictionary with unsupported fields removed
-            
+
         Related issue: https://github.com/BerriAI/litellm/issues/19444
         """
         if not isinstance(schema, dict):
@@ -661,12 +678,12 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
 
     @staticmethod
     def _map_reasoning_effort(
-        reasoning_effort: Optional[Union[REASONING_EFFORT, str]], 
+        reasoning_effort: Optional[Union[REASONING_EFFORT, str]],
         model: str,
     ) -> Optional[AnthropicThinkingParam]:
         if reasoning_effort is None or reasoning_effort == "none":
             return None
-        if AnthropicConfig._is_claude_opus_4_6(model):
+        if AnthropicConfig._is_claude_4_6_model(model):
             return AnthropicThinkingParam(
                 type="adaptive",
             )
@@ -714,10 +731,10 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         )
         if json_schema is None:
             return None
-        
+
         # Filter out unsupported fields for Anthropic's output_format API
         filtered_schema = self.filter_anthropic_output_schema(json_schema)
-        
+
         return AnthropicOutputSchema(
             type="json_schema",
             schema=filtered_schema,
@@ -1032,7 +1049,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         """
         Ensure a beta header value is present in the anthropic-beta header.
         Merges with existing values instead of overriding them.
-        
+
         Args:
             headers: Dictionary of headers to update
             beta_value: The beta header value to add
@@ -1054,23 +1071,23 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         - For all other edits, add context-management-2025-06-27 header
         """
         edits = context_management.get("edits", [])
-        
+
         has_compact = False
         has_other = False
-        
+
         for edit in edits:
             edit_type = edit.get("type", "")
             if edit_type == "compact_20260112":
                 has_compact = True
             else:
                 has_other = True
-        
+
         # Add compact header if any compact edits exist
         if has_compact:
             self._ensure_beta_header(
                 headers, ANTHROPIC_BETA_HEADER_VALUES.COMPACT_2026_01_12.value
             )
-        
+
         # Add context management header if any other edits exist
         if has_other:
             self._ensure_beta_header(
@@ -1081,7 +1098,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
         self, headers: dict, optional_params: dict
     ) -> dict:
         """Update headers with optional anthropic beta."""
-        
+
         # Skip adding beta headers for Vertex requests
         # Vertex AI handles these headers differently
         is_vertex_request = optional_params.get("is_vertex_request", False)
@@ -1316,7 +1333,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 elif content["type"] == "web_fetch_tool_result":
                     if web_search_results is None:
                         web_search_results = []
-                    web_search_results.append(content)  
+                    web_search_results.append(content)
                 else:
                     # All other tool results (bash_code_execution_tool_result, text_editor_code_execution_tool_result, etc.)
                     if tool_results is None:
@@ -1333,7 +1350,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 thinking_blocks.append(
                     cast(ChatCompletionRedactedThinkingBlock, content)
                 )
-            
+
             ## COMPACTION
             elif content["type"] == "compaction":
                 if compaction_blocks is None:
@@ -1541,7 +1558,7 @@ class AnthropicConfig(AnthropicModelInfo, BaseConfig):
                 provider_specific_fields["container"] = container
             if compaction_blocks is not None:
                 provider_specific_fields["compaction_blocks"] = compaction_blocks
-                
+
             _message = litellm.Message(
                 tool_calls=tool_calls,
                 content=text_content or None,
